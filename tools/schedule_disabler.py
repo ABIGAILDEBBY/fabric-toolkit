@@ -170,11 +170,6 @@ def disable_fabric_schedule(item_id):
                     if s.get('enabled'):
                         s['enabled'] = False
                         updated = True
-                        cfg = s.get('configuration', {})
-                        if 'startDateTime' in cfg:
-                            cfg['startDateTime'] = '2099-01-01T00:00:00'
-                        if 'endDateTime' in cfg:
-                            cfg['endDateTime'] = '2100-12-31T23:59:59'
                 new_payload = base64.b64encode(
                     json.dumps(data, indent=2).encode('utf-8')
                 ).decode('utf-8')
