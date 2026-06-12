@@ -1,6 +1,6 @@
 # Contributing to fabric-toolkit
 
-Thank you for your interest in contributing. All contributions are welcome — bug fixes, new tools, documentation improvements, and ideas.
+Thank you for your interest in contributing. All contributions are welcome: bug fixes, new tools, documentation improvements, and ideas.
 
 ## How to contribute
 
@@ -14,7 +14,7 @@ Thank you for your interest in contributing. All contributions are welcome — b
    ```bash
    git checkout -b feat/your-feature-name
    ```
-4. **Make your changes** — see guidelines below
+4. **Make your changes.** See guidelines below.
 5. **Commit** with a clear message
    ```bash
    git commit -m "feat: add workspace inventory tool"
@@ -29,9 +29,9 @@ Thank you for your interest in contributing. All contributions are welcome — b
 
 - No hardcoded workspace IDs, tenant IDs, client IDs, or item IDs
 - No client-specific names, URLs, or connection strings
-- The tool must work interactively — prompt for workspace, item types, etc.
+- The tool must work interactively. Prompt for workspace, item types, and any other required input.
 - Authentication must use `config.py` (the shared `CLIENT_ID` pattern)
-- No dependency on other toolkit scripts — each tool is self-contained
+- No dependency on other toolkit scripts. Each tool is self-contained.
 - Add a one-line description of your tool to the tools table in `README.md`
 
 ## Commit message format
