@@ -41,7 +41,7 @@ REQUIRED = ['msal', 'requests', 'openpyxl', 'rich']
 for pkg in REQUIRED:
     try:
         __import__(pkg)
-    except ImportError:
+    except ImportError:  # pragma: no cover
         print(f'Installing {pkg}...')
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg, '--quiet'])
         print(f'  {pkg} installed.')
@@ -68,7 +68,7 @@ from rich import box
 
 try:
     sys.stdout.reconfigure(encoding='utf-8')
-except (AttributeError, io.UnsupportedOperation):
+except (AttributeError, io.UnsupportedOperation):  # pragma: no cover
     pass
 console = Console()
 

@@ -366,3 +366,175 @@ class TestGetToken:
 
         with pytest.raises(SystemExit):
             dis.get_token(['scope'], mock_app, mock_cache)
+
+
+# ── get_token – cache state branches ─────────────────────────────────────────
+
+class TestGetTokenCachePaths:
+    def test_cache_written_when_state_changed(self):
+        mock_app = MagicMock()
+        mock_cache = MagicMock()
+        mock_cache.has_state_changed = True
+        mock_cache.serialize.return_value = 'serialized-data'
+        mock_app.get_accounts.return_value = [{'username': 'test@example.com'}]
+        mock_app.acquire_token_silent.return_value = {'access_token': 'token'}
+
+        mock_cf = MagicMock()
+        with patch.object(dis, 'CACHE_FILE', mock_cf):
+            dis.get_token(['scope'], mock_app, mock_cache)
+
+        mock_cf.write_text.assert_called_once_with('serialized-data', encoding='utf-8')
+
+    def test_chmod_failure_silently_ignored(self):
+        mock_app = MagicMock()
+        mock_cache = MagicMock()
+        mock_cache.has_state_changed = True
+        mock_cache.serialize.return_value = 'data'
+        mock_app.get_accounts.return_value = [{'username': 'test@example.com'}]
+        mock_app.acquire_token_silent.return_value = {'access_token': 'token'}
+
+        mock_cf = MagicMock()
+        mock_cf.chmod.side_effect = AttributeError
+        with patch.object(dis, 'CACHE_FILE', mock_cf):
+            result = dis.get_token(['scope'], mock_app, mock_cache)
+
+        assert result == 'token'
+
+
+# ── get_parts – polling timeout ───────────────────────────────────────────────
+
+class TestGetPartsAdditional:
+    def setup_method(self):
+        dis.WORKSPACE_ID = 'ws-test-id'
+        dis.FAB = {'Authorization': 'Bearer test-token'}
+
+    @pytest.mark.integration
+    def test_polling_timeout_returns_empty(self):
+        async_resp = MagicMock()
+        async_resp.status_code = 202
+        async_resp.headers = {'Location': 'https://api.example.com/ops/1'}
+
+        never_done = MagicMock()
+        never_done.status_code = 202
+
+        with patch('requests.post', return_value=async_resp), \
+             patch('requests.get', return_value=never_done), \
+             patch('time.sleep'):
+            result = dis.get_parts('item-timeout')
+
+        assert result == []
+
+
+# ── push_parts ────────────────────────────────────────────────────────────────
+
+class TestPushParts:
+    def setup_method(self):
+        dis.WORKSPACE_ID = 'ws-test-id'
+        dis.FAB = {'Authorization': 'Bearer test-token'}
+
+    @pytest.mark.integration
+    def test_200_returns_true(self):
+        resp = MagicMock()
+        resp.status_code = 200
+
+        with patch('requests.post', return_value=resp):
+            result = dis.push_parts('item-1', [])
+
+        assert result is True
+
+    @pytest.mark.integration
+    def test_202_async_succeeded_returns_true(self):
+        push_resp = MagicMock()
+        push_resp.status_code = 202
+        push_resp.headers = {'Location': 'https://api.example.com/ops/1'}
+
+        poll_resp = MagicMock()
+        poll_resp.status_code = 202
+        poll_resp.json.return_value = {'status': 'Succeeded'}
+
+        with patch('requests.post', return_value=push_resp), \
+             patch('requests.get', return_value=poll_resp), \
+             patch('time.sleep'):
+            result = dis.push_parts('item-2', [])
+
+        assert result is True
+
+    @pytest.mark.integration
+    def test_202_async_failed_returns_false(self):
+        push_resp = MagicMock()
+        push_resp.status_code = 202
+        push_resp.headers = {'Location': 'https://api.example.com/ops/1'}
+
+        poll_resp = MagicMock()
+        poll_resp.status_code = 202
+        poll_resp.json.return_value = {'status': 'Failed'}
+
+        with patch('requests.post', return_value=push_resp), \
+             patch('requests.get', return_value=poll_resp), \
+             patch('time.sleep'):
+            result = dis.push_parts('item-3', [])
+
+        assert result is False
+
+    @pytest.mark.integration
+    def test_202_missing_location_returns_false(self):
+        push_resp = MagicMock()
+        push_resp.status_code = 202
+        push_resp.headers = {}
+
+        with patch('requests.post', return_value=push_resp):
+            result = dis.push_parts('item-4', [])
+
+        assert result is False
+
+
+# ── disable_fabric_schedule – additional branches ─────────────────────────────
+
+class TestDisableFabricScheduleAdditional:
+    def setup_method(self):
+        dis.WORKSPACE_ID = 'ws-test-id'
+        dis.FAB = {'Authorization': 'Bearer test-token'}
+
+    @pytest.mark.integration
+    def test_corrupt_payload_returns_parse_error(self):
+        bad_parts = [{'path': '.schedules', 'payload': 'NOT_VALID_BASE64!!!'}]
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        resp.json.return_value = {'definition': {'parts': bad_parts}}
+
+        with patch('requests.post', return_value=resp):
+            ok, msg = dis.disable_fabric_schedule('item-corrupt')
+
+        assert ok is False
+        assert 'Parse error' in msg
+
+    @pytest.mark.integration
+    def test_non_schedule_part_included_in_push(self):
+        schedule_payload = base64.b64encode(
+            json.dumps({'schedules': [{'enabled': True}]}).encode()
+        ).decode()
+        parts = [
+            {'path': 'pipeline.json', 'payload': 'e30='},
+            {'path': '.schedules', 'payload': schedule_payload},
+        ]
+
+        get_resp = MagicMock()
+        get_resp.status_code = 200
+        get_resp.ok = True
+        get_resp.json.return_value = {'definition': {'parts': parts}}
+
+        push_resp = MagicMock()
+        push_resp.status_code = 200
+        push_resp.ok = True
+
+        with patch('requests.post') as mock_post:
+            mock_post.side_effect = [get_resp, push_resp]
+            ok, msg = dis.disable_fabric_schedule('item-mixed')
+
+        assert ok is True
+        push_body = mock_post.call_args_list[1].kwargs.get('json') \
+            or mock_post.call_args_list[1][1]['json']
+        pushed_paths = [p['path'] for p in push_body['definition']['parts']]
+        assert 'pipeline.json' in pushed_paths
