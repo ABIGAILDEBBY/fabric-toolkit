@@ -1,0 +1,53 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--tb=short",
+    "--strict-markers",
+]
+markers = [
+    "unit: pure logic, no network",
+    "integration: requires mocked HTTP",
+]
+
+[tool.coverage.run]
+source = ["tools"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 25
+exclude_lines = [
+    "def main\\(\\):",
+    "if __name__ == .__main__.:",
+    "sys\\.exit",
+]
+
+[tool.pylint.main]
+recursive = true
+ignore = ["tests"]
+
+[tool.pylint.messages_control]
+disable = [
+    "C0114",  # missing-module-docstring (scripts have module docstrings)
+    "C0116",  # missing-function-docstring (concise code is fine)
+    "R0914",  # too-many-locals (scripts legitimately have many)
+    "R0915",  # too-many-statements (main() is intentionally long)
+    "R0912",  # too-many-branches (main() orchestration is intentionally complex)
+    "W0603",  # global-statement (needed for runtime globals pattern)
+    "W0718",  # broad-exception-caught (network code needs broad catches)
+    "C0301",  # line-too-long (handled by formatter if needed)
+    "C0413",  # wrong-import-position (auto-install block precedes third-party imports by design)
+    "C0411",  # wrong-import-order (same reason as C0413)
+    "C0415",  # import-outside-toplevel (config.CLIENT_ID loaded inside main to avoid gitignored file at module level)
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.pylint.design]
+max-args = 10
+max-branches = 20
