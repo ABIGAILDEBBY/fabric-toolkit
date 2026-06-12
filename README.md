@@ -1,12 +1,8 @@
 <div align="center">
 
-<img src="docs/fabric-logo.svg" width="80" alt="Microsoft Fabric" />
-
 # fabric-toolkit
 
 Python utilities for Microsoft Fabric. Schedule management, pipeline auditing, Teams alerting, and more from the terminal.
-
-<br/>
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Microsoft Fabric](https://img.shields.io/badge/Microsoft%20Fabric-compatible-00B0F0?style=flat-square&logo=microsoft&logoColor=white)](https://learn.microsoft.com/en-us/fabric/)
