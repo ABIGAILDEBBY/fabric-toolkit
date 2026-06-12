@@ -4,7 +4,7 @@
 
 # fabric-toolkit
 
-### A collection of Python utilities for Microsoft Fabric
+## A collection of Python utilities for Microsoft Fabric
 
 Manage schedules, audit pipelines, set up Teams alerting, check data freshness,
 and more. All from the command line, without writing a single line of DAX or clicking through portals.
@@ -31,7 +31,7 @@ and more. All from the command line, without writing a single line of DAX or cli
 
 No hardcoded workspace IDs. No dependencies between tools. Authenticate once and work interactively. Every tool discovers your workspaces at runtime and walks you through what it needs.
 
-```
+```txt
 ✔  Audit every schedule in a workspace and export to Excel
 ✔  Bulk-disable schedules by item type: pipelines, dataflows, notebooks, and more
 ✔  Find legacy duplicate pipelines and flag them for cleanup
@@ -47,14 +47,14 @@ No hardcoded workspace IDs. No dependencies between tools. Authenticate once and
 
 | Tool | What it does |
 |---|---|
-| [`schedule_extractor.py`](tools/schedule_extractor.py) | Scans every item in a workspace and exports a full schedule inventory to Excel: pipelines, semantic models, dataflows, notebooks, and Spark jobs |
-| [`schedule_disabler.py`](tools/schedule_disabler.py) | Bulk-disables active schedules. Choose item types, discover live or load from a file, confirm before anything changes |
-| [`legacy_pipeline_audit.py`](tools/legacy_pipeline_audit.py) | Finds `_LEGACY` duplicate pipelines, checks if they are still scheduled or running, and flags which ones are safe to clean up |
-| [`data_freshness_check.py`](tools/data_freshness_check.py) | Identifies semantic models and lakehouses with stale data. Pinpoints whether the issue is in the refresh schedule or the source tables |
-| [`pipeline_watermark_check.py`](tools/pipeline_watermark_check.py) | Inspects pipelines for watermark and date parameters to distinguish incremental vs full loads |
-| [`audit_log_check.py`](tools/audit_log_check.py) | Pulls the Fabric audit log to show who created, modified, ran, or deleted pipeline items, with date filtering |
-| [`teams_alert_scanner.py`](tools/teams_alert_scanner.py) | Scans all pipelines to surface every existing Teams/webhook notification activity and what notebook or URL it calls |
-| [`alerting_readiness_check.py`](tools/alerting_readiness_check.py) | Classifies every pipeline into **Safe Now**, **Review First**, or **Do Not Touch** based on complexity, existing alerting, and recent run history |
+| `schedule_extractor.py` | Scans every item in a workspace and exports a full schedule inventory to Excel: pipelines, semantic models, dataflows, notebooks, and Spark jobs |
+| `schedule_disabler.py` | Bulk-disables active schedules. Choose item types, discover live or load from a file, confirm before anything changes |
+| `legacy_pipeline_audit.py` | Finds `_LEGACY` duplicate pipelines, checks if they are still scheduled or running, and flags which ones are safe to clean up |
+| `data_freshness_check.py` | Identifies semantic models and lakehouses with stale data. Pinpoints whether the issue is in the refresh schedule or the source tables |
+| `pipeline_watermark_check.py` | Inspects pipelines for watermark and date parameters to distinguish incremental vs full loads |
+| `audit_log_check.py` | Pulls the Fabric audit log to show who created, modified, ran, or deleted pipeline items, with date filtering |
+| `teams_alert_scanner.py` | Scans all pipelines to surface every existing Teams/webhook notification activity and what notebook or URL it calls |
+| `alerting_readiness_check.py` | Classifies every pipeline into **Safe Now**, **Review First**, or **Do Not Touch** based on complexity, existing alerting, and recent run history |
 
 ---
 
@@ -76,7 +76,7 @@ The system has three parts:
 2. **Failure branch wiring** — each pipeline activity gets its own alert node on failure, passing the exact `@activity('name').error.message` expression.
 3. **Success branch wiring** — a separate alert node fires on the success path with `PipelineStatus = Success`.
 
-See [`alerting/README.md`](alerting/README.md) for the full setup walkthrough.
+See `alerting/README.md` for the full setup walkthrough (added in a future PR).
 
 ---
 
@@ -160,7 +160,7 @@ Each tool will:
 
 ## Requirements
 
-```
+```txt
 Python 3.8+
 msal
 requests

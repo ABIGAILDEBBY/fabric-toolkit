@@ -26,7 +26,7 @@ If you belong to an organisation, you may need your IT administrator to grant ad
 
 4. Fill in the form:
    - **Name:** `fabric-toolkit` (or any name you prefer)
-   - **Supported account types:** Select _Accounts in any organizational directory (Any Microsoft Entra ID tenant)_
+   - **Supported account types:** Select _Accounts in any organisational directory (Any Microsoft Entra ID tenant)_
    - **Redirect URI:** Leave blank for now
 
 5. Click **Register**
@@ -55,7 +55,7 @@ Still on your app registration page:
    |---|---|
    | `user_impersonation` | Delegated |
 
-   To find this: click _APIs my organization uses_, search for **Microsoft Fabric**, select it, choose _Delegated permissions_, and tick `user_impersonation`.
+   To find this: click _APIs my organisation uses_, search for **Microsoft Fabric**, select it, choose _Delegated permissions_, and tick `user_impersonation`.
 
    **Power BI Service**
 
@@ -65,7 +65,7 @@ Still on your app registration page:
    | `Workspace.Read.All` | Delegated |
    | `Pipeline.ReadWrite.All` | Delegated |
 
-   To find this: click _APIs my organization uses_, search for **Power BI Service**, select it, choose _Delegated permissions_, and tick each permission above.
+   To find this: click _APIs my organisation uses_, search for **Power BI Service**, select it, choose _Delegated permissions_, and tick each permission above.
 
 4. Once all permissions are added, click **Grant admin consent for [your organisation]**
 
