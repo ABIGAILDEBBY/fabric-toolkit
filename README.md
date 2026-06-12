@@ -25,7 +25,7 @@ A small set of command-line tools for day-to-day Microsoft Fabric workspace mana
 |---|---|
 | `schedule_extractor.py` | Pulls a full schedule inventory across pipelines, semantic models, dataflows, notebooks, and Spark jobs and writes it to Excel |
 | `schedule_disabler.py` | Disables active schedules in bulk. Works from a live API scan or a file you provide. Confirms before touching anything. |
-| `legacy_pipeline_audit.py` | Finds `_LEGACY` duplicate pipelines, checks if they are still running or scheduled, and flags which are safe to remove |
+| `workspace_cleanup_scanner.py` | Finds stale or duplicate items matching patterns you define, checks if they are still running or scheduled, and flags which are safe to remove |
 | `data_freshness_check.py` | Identifies stale semantic models and lakehouses and narrows down whether the problem is the refresh schedule or the source |
 | `pipeline_watermark_check.py` | Inspects pipeline parameters for watermarks and date ranges to tell incremental loads apart from full loads |
 | `audit_log_check.py` | Queries the Fabric activity log to show who created, modified, or deleted pipeline items over a date range |
