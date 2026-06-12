@@ -46,13 +46,15 @@ for pkg in REQUIRED:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg, '--quiet'])
         print(f'  {pkg} installed.')
 
+import io
 import msal
 import requests
 import json
 import base64
 import time
+import re
 import openpyxl
-from datetime import datetime
+from datetime import datetime, timezone
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from rich.console import Console
@@ -64,7 +66,10 @@ from rich.table import Table
 from rich.panel import Panel
 from rich import box
 
-sys.stdout.reconfigure(encoding='utf-8')
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except (AttributeError, io.UnsupportedOperation):
+    pass
 console = Console()
 
 # ── Load CLIENT_ID from config.py ─────────────────────────────────────────────
@@ -132,14 +137,21 @@ def get_token(scopes):
             token = app.acquire_token_interactive(scopes)
         except Exception:
             flow = app.initiate_device_flow(scopes)
+            if 'error' in flow:
+                console.print(f'[bold red]Device flow error: {flow.get("error_description", flow["error"])}[/bold red]')
+                sys.exit(1)
             console.print(flow['message'])
             token = app.acquire_token_by_device_flow(flow)
-    if 'access_token' not in token:
+    if not token or 'access_token' not in token:
         console.print('[bold red]ERROR: Authentication failed.[/bold red]')
         console.print(token.get('error_description', 'Unknown error'))
         sys.exit(1)
     if cache.has_state_changed:
         CACHE_FILE.write_text(cache.serialize(), encoding='utf-8')
+        try:
+            CACHE_FILE.chmod(0o600)
+        except (AttributeError, NotImplementedError):
+            pass
     return token['access_token']
 
 
@@ -199,7 +211,8 @@ console.print(f'  [bold]Workspace:[/bold] [cyan]{WORKSPACE_NAME}[/cyan]')
 console.print(f'  [bold]ID:[/bold]        [dim]{WORKSPACE_ID}[/dim]')
 console.print()
 
-OUTPUT_PATH = Path.home() / 'Downloads' / f'{WORKSPACE_NAME} - Schedule Inventory.xlsx'
+_safe_name = re.sub(r'[\\/:*?"<>|]', '_', WORKSPACE_NAME).strip()
+OUTPUT_PATH = Path.home() / 'Downloads' / f'{_safe_name} - Schedule Inventory.xlsx'
 
 # ── Item type selection ────────────────────────────────────────────────────────
 ITEM_MENU = [
@@ -289,7 +302,9 @@ def get_definition_parts(item_id):
             headers=FAB, timeout=TIMEOUT
         )
         if r.status_code == 202:
-            op_url = r.headers.get('Location')
+            op_url = r.headers.get('Location') or r.headers.get('location')
+            if not op_url:
+                return []
             for _ in range(15):
                 time.sleep(2)
                 try:
@@ -746,7 +761,7 @@ COLS = [
 ]
 PARENT_COLS = ['Parent Pipeline', 'Child Pipeline']
 
-stamp      = f'{WORKSPACE_NAME}  |  Extracted: ' + datetime.now().strftime('%Y-%m-%d %H:%M UTC')
+stamp      = f'{WORKSPACE_NAME}  |  Extracted: ' + datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 all_active = active_pl + active_sm + active_df + active_nb + active_sj
 
 
