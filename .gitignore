@@ -1,0 +1,34 @@
+# User config — never commit this
+config.py
+
+# Token caches
+*.bin
+*.cache
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Output files
+*.xlsx
+*.csv
+*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
