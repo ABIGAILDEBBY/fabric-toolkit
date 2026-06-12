@@ -72,9 +72,9 @@ The toolkit includes a complete **pipeline failure and success alerting system**
 
 The system has three parts:
 
-1. **`nb_send_pipeline_alert`** — a Fabric notebook that builds and posts the Adaptive Card. Parameters are injected by the pipeline at runtime.
-2. **Failure branch wiring** — each pipeline activity gets its own alert node on failure, passing the exact `@activity('name').error.message` expression.
-3. **Success branch wiring** — a separate alert node fires on the success path with `PipelineStatus = Success`.
+1. **`nb_send_pipeline_alert`**: a Fabric notebook that builds and posts the Adaptive Card. Parameters are injected by the pipeline at runtime.
+2. **Failure branch wiring**: each pipeline activity gets its own alert node on failure, passing the exact `@activity('name').error.message` expression.
+3. **Success branch wiring**: a separate alert node fires on the success path with `PipelineStatus = Success`.
 
 See `alerting/README.md` for the full setup walkthrough (added in a future PR).
 
@@ -104,7 +104,7 @@ On first run a browser window opens for Microsoft sign-in. Your token is cached 
 
 ## Setup Guide
 
-### Step 1 — Register an Azure App (5 minutes, one-time)
+### Step 1: Register an Azure App (5 minutes, one-time)
 
 You need an Azure App Registration so the toolkit can authenticate with Microsoft APIs on your behalf. This is free and requires only a Microsoft account.
 
@@ -131,7 +131,7 @@ You need an Azure App Registration so the toolkit can authenticate with Microsof
 
 For a detailed walkthrough with screenshots, see [SETUP.md](SETUP.md).
 
-### Step 2 — Configure the toolkit
+### Step 2: Configure the toolkit
 
 ```python
 # config.py
@@ -140,7 +140,7 @@ CLIENT_ID = "paste-your-application-client-id-here"
 
 `config.py` is listed in `.gitignore` and will never be accidentally committed.
 
-### Step 3 — Run
+### Step 3: Run
 
 Every tool is self-contained. Run any script directly:
 
