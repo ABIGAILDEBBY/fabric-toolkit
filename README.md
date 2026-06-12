@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://res.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/fabric_48x1.svg" alt="Microsoft Fabric" width="72" height="72" />
+<img src="docs/fabric-logo.svg" alt="Microsoft Fabric" width="80" height="80" />
 
 # fabric-toolkit
 
