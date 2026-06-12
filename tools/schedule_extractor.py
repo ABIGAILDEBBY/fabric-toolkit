@@ -41,7 +41,7 @@ REQUIRED = ['msal', 'requests', 'openpyxl', 'rich']
 for pkg in REQUIRED:
     try:
         __import__(pkg)
-    except ImportError:
+    except ImportError:  # pragma: no cover
         print(f'Installing {pkg}...')
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg, '--quiet'])
         print(f'  {pkg} installed.')
@@ -68,29 +68,77 @@ from rich import box
 
 try:
     sys.stdout.reconfigure(encoding='utf-8')
-except (AttributeError, io.UnsupportedOperation):
+except (AttributeError, io.UnsupportedOperation):  # pragma: no cover
     pass
 console = Console()
 
-# ── Load CLIENT_ID from config.py ─────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent.parent))
-try:
-    from config import CLIENT_ID
-except ImportError:
-    console.print('[bold red]ERROR: config.py not found.[/bold red]')
-    console.print('Copy config.example.py to config.py and add your CLIENT_ID.')
-    sys.exit(1)
-
-# ── Configuration ─────────────────────────────────────────────────────────────
+# ── Static configuration ───────────────────────────────────────────────────────
 AUTHORITY  = 'https://login.microsoftonline.com/organizations'
 TIMEOUT    = 30
 CACHE_FILE = Path.home() / '.fabric_token_cache.bin'
 BASE       = 'https://api.fabric.microsoft.com/v1'
 PBI_BASE   = 'https://api.powerbi.com/v1.0/myorg'
+FAB_SCOPES = ['https://api.fabric.microsoft.com/.default']
+PBI_SCOPES = ['https://analysis.windows.net/powerbi/api/.default']
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Excel style constants ──────────────────────────────────────────────────────
+NAVY     = 'FF1F3864'
+BLUE     = 'FF2E75B6'
+WHITE    = 'FFFFFFFF'
+LIGHT    = 'FFD6E4F7'
+GREY     = 'FFF2F2F2'
+GREEN_BG = 'FFE2EFDA'
+GREEN_FG = 'FF375623'
+RED_BG   = 'FFFFC7CE'
+RED_FG   = 'FF9C0006'
+AMBER_BG = 'FFFFFF99'
+AMBER_FG = 'FF833C00'
+thin     = Side(style='thin', color='FFD9D9D9')
+bdr      = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+COLS = [
+    'Item Type', 'Name', 'Enabled', 'Schedule Type', 'Run Time(s)', 'Timezone',
+    'Weekdays', 'Interval', 'Schedule From', 'Schedule Until',
+    'Last Run', 'Last Run Status', 'Invokes (children)',
+]
+PARENT_COLS = ['Parent Pipeline', 'Child Pipeline']
+
+# ── Runtime globals (set by main, read by helper functions) ───────────────────
+WORKSPACE_ID: str       = ''
+FAB: dict               = {}
+PBI: dict               = {}
+INCLUDE_UNSCHEDULED: bool = True
+CHECKPOINT_FILE: Path   = Path.home() / '.fabric_checkpoint_default.json'
+
+
+# ── Pure utility functions ─────────────────────────────────────────────────────
 def trunc(s, n=52):
     return (s[:n - 3] + '...') if len(s) > n else s
+
+
+def sanitize_filename(name):
+    return re.sub(r'[\\/:*?"<>|]', '_', name).strip()
+
+
+def fmt_time(t):
+    if not t or t == 'Never':
+        return t or 'Never'
+    try:
+        dt = datetime.fromisoformat(str(t).replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d %H:%M UTC')
+    except Exception:
+        return str(t)
+
+
+def fmt_dur(seconds):
+    seconds = int(seconds)
+    h, rem  = divmod(seconds, 3600)
+    m, s    = divmod(rem, 60)
+    if h:
+        return f'{h}h {m}m {s}s'
+    if m:
+        return f'{m}m {s}s'
+    return f'{s}s'
 
 
 def make_progress():
@@ -107,26 +155,8 @@ def make_progress():
     )
 
 
-# ── Banner ────────────────────────────────────────────────────────────────────
-console.print()
-console.print(Panel.fit(
-    '[bold cyan]Fabric Schedule Extractor[/bold cyan]',
-    border_style='cyan',
-))
-console.print()
-
-# ── Authentication ─────────────────────────────────────────────────────────────
-FAB_SCOPES = ['https://api.fabric.microsoft.com/.default']
-PBI_SCOPES = ['https://analysis.windows.net/powerbi/api/.default']
-
-cache = msal.SerializableTokenCache()
-if CACHE_FILE.exists():
-    cache.deserialize(CACHE_FILE.read_text(encoding='utf-8'))
-
-app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY, token_cache=cache)
-
-
-def get_token(scopes):
+# ── Auth ───────────────────────────────────────────────────────────────────────
+def get_token(scopes, app, cache):
     accounts = app.get_accounts()
     token    = None
     if accounts:
@@ -144,7 +174,7 @@ def get_token(scopes):
             token = app.acquire_token_by_device_flow(flow)
     if not token or 'access_token' not in token:
         console.print('[bold red]ERROR: Authentication failed.[/bold red]')
-        console.print(token.get('error_description', 'Unknown error'))
+        console.print((token or {}).get('error_description', 'Unknown error'))
         sys.exit(1)
     if cache.has_state_changed:
         CACHE_FILE.write_text(cache.serialize(), encoding='utf-8')
@@ -155,146 +185,7 @@ def get_token(scopes):
     return token['access_token']
 
 
-console.print('[dim]Authenticating...[/dim]')
-fab_at = get_token(FAB_SCOPES)
-pbi_at = get_token(PBI_SCOPES)
-FAB = {'Authorization': 'Bearer ' + fab_at, 'Content-Type': 'application/json'}
-PBI = {'Authorization': 'Bearer ' + pbi_at}
-console.print('[bold green]✓[/bold green] Authenticated successfully.')
-console.print()
-
-run_start     = time.time()
-section_times = {}
-
-# ── Workspace Selection ────────────────────────────────────────────────────────
-console.print('[dim]Fetching available workspaces...[/dim]')
-ws_resp = requests.get(BASE + '/workspaces', headers=FAB, timeout=TIMEOUT)
-if ws_resp.status_code != 200:
-    console.print(f'[bold red]ERROR: Could not list workspaces ({ws_resp.status_code})[/bold red]')
-    console.print(ws_resp.text[:500])
-    sys.exit(1)
-all_workspaces = ws_resp.json().get('value', [])
-console.print(f'[bold green]✓[/bold green] {len(all_workspaces)} workspaces available.')
-console.print()
-
-search      = console.input('[bold]Enter workspace name[/bold] [dim](or part of it)[/dim]: ').strip().lower()
-search_norm = search.replace(' ', '').replace('-', '')
-matches     = [
-    w for w in all_workspaces
-    if search in w['displayName'].lower()
-    or search_norm in w['displayName'].lower().replace(' ', '').replace('-', '')
-]
-
-if not matches:
-    console.print(f'\n[red]No workspace found matching "[bold]{search}[/bold]". Available workspaces:[/red]')
-    for w in sorted(all_workspaces, key=lambda x: x['displayName']):
-        console.print(f'  {w["displayName"]}')
-    sys.exit(1)
-
-if len(matches) == 1:
-    selected_workspace = matches[0]
-else:
-    console.print('\n[yellow]Multiple matches found:[/yellow]')
-    for i, w in enumerate(matches, 1):
-        console.print(f'  [[bold]{i}[/bold]] {w["displayName"]}')
-    choice = console.input('Enter number: ').strip()
-    try:
-        selected_workspace = matches[int(choice) - 1]
-    except (ValueError, IndexError):
-        console.print('[red]Invalid choice.[/red]')
-        sys.exit(1)
-
-WORKSPACE_ID   = selected_workspace['id']
-WORKSPACE_NAME = selected_workspace['displayName']
-console.print()
-console.print(f'  [bold]Workspace:[/bold] [cyan]{WORKSPACE_NAME}[/cyan]')
-console.print(f'  [bold]ID:[/bold]        [dim]{WORKSPACE_ID}[/dim]')
-console.print()
-
-_safe_name = re.sub(r'[\\/:*?"<>|]', '_', WORKSPACE_NAME).strip()
-OUTPUT_PATH = Path.home() / 'Downloads' / f'{_safe_name} - Schedule Inventory.xlsx'
-
-# ── Item type selection ────────────────────────────────────────────────────────
-ITEM_MENU = [
-    ('pipelines',       'Data Pipelines'),
-    ('semantic_models', 'Semantic Models'),
-    ('dataflows',       'Dataflows'),
-    ('notebooks',       'Notebooks'),
-    ('spark_jobs',      'Spark Job Definitions'),
-]
-
-console.print('[bold]Which item types would you like to extract?[/bold]')
-console.print()
-for i, (_, label) in enumerate(ITEM_MENU, 1):
-    console.print(f'  [[bold cyan]{i}[/bold cyan]] {label}')
-console.print(f'  [[bold cyan]A[/bold cyan]] All of the above [dim](default)[/dim]')
-console.print()
-raw = console.input('Enter numbers separated by commas, or press [bold]Enter[/bold] for all: ').strip().upper()
-
-if not raw or raw == 'A':
-    selected_types = {key for key, _ in ITEM_MENU}
-else:
-    selected_types = set()
-    for s in raw.split(','):
-        s = s.strip()
-        if s.isdigit():
-            idx = int(s) - 1
-            if 0 <= idx < len(ITEM_MENU):
-                selected_types.add(ITEM_MENU[idx][0])
-    if not selected_types:
-        console.print('[yellow]  No valid selection — defaulting to all.[/yellow]')
-        selected_types = {key for key, _ in ITEM_MENU}
-
-console.print()
-console.print('[bold]Extracting:[/bold]')
-for key, label in ITEM_MENU:
-    if key in selected_types:
-        console.print(f'  [green]+[/green] {label}')
-console.print()
-
-include_unscheduled = console.input(
-    'Include items with [bold]no schedule[/bold] in the output? [[bold]Y[/bold]/n]: '
-).strip().lower() != 'n'
-console.print()
-
-# ── Checkpoint ────────────────────────────────────────────────────────────────
-CHECKPOINT_FILE = Path.home() / f'.fabric_checkpoint_{WORKSPACE_ID}.json'
-checkpoint      = {}
-
-if CHECKPOINT_FILE.exists():
-    age_seconds = time.time() - CHECKPOINT_FILE.stat().st_mtime
-    age_minutes = int(age_seconds / 60)
-    if age_seconds < 3600:
-        resp = console.input(
-            f'[yellow]Found cached pipeline data from {age_minutes} minute(s) ago.[/yellow] '
-            f'Resume from where it left off? [y/[bold]N[/bold]]: '
-        ).strip().lower()
-        if resp == 'y':
-            try:
-                checkpoint = json.loads(CHECKPOINT_FILE.read_text(encoding='utf-8'))
-                console.print(f'[green]✓[/green] Resuming — {len(checkpoint)} pipelines already cached.')
-            except Exception:
-                checkpoint = {}
-        else:
-            CHECKPOINT_FILE.unlink()
-            console.print('[dim]  Starting fresh.[/dim]')
-    else:
-        console.print(f'[dim]  Cached data is {age_minutes} minutes old — discarding and starting fresh.[/dim]')
-        CHECKPOINT_FILE.unlink()
-
-console.print()
-
-# ── API helpers ────────────────────────────────────────────────────────────────
-def fmt_time(t):
-    if not t or t == 'Never':
-        return t or 'Never'
-    try:
-        dt = datetime.fromisoformat(str(t).replace('Z', '+00:00'))
-        return dt.strftime('%Y-%m-%d %H:%M UTC')
-    except Exception:
-        return str(t)
-
-
+# ── API helpers (use runtime globals WORKSPACE_ID, FAB, PBI) ─────────────────
 def get_definition_parts(item_id):
     try:
         r = requests.post(
@@ -437,16 +328,16 @@ def process_definition_items(item_type, type_label):
                     tags.append(f'[green]{active_count} active schedule{"s" if active_count > 1 else ""}[/green]')
                 if disabled_count:
                     tags.append(f'[yellow]{disabled_count} disabled[/yellow]')
-                console.print(f'  [dim]{trunc(name, 60)}[/dim]  {"  ·  ".join(tags)}')
+                console.print(f'  [dim]{trunc(name, 60)}[/dim]  {"  .  ".join(tags)}')
                 for s in schedules:
                     rows.append({**base_row,
                         'Enabled':        'Yes' if s['enabled'] else 'No (Disabled)',
-                        'Schedule Type':  s['type'],    'Run Time(s)':   s['times'],
+                        'Schedule Type':  s['type'],     'Run Time(s)':   s['times'],
                         'Timezone':       s['timezone'], 'Weekdays':      s['weekdays'],
                         'Interval':       s['interval'], 'Schedule From': s['start_date'],
                         'Schedule Until': s['end_date'],
                     })
-            elif include_unscheduled:
+            elif INCLUDE_UNSCHEDULED:
                 rows.append({**base_row,
                     'Enabled': 'No schedule', 'Schedule Type': '', 'Run Time(s)': '',
                     'Timezone': '', 'Weekdays': '', 'Interval': '',
@@ -458,313 +349,7 @@ def process_definition_items(item_type, type_label):
     return rows
 
 
-# ── Initialise result containers ───────────────────────────────────────────────
-pipeline_rows = []; parent_child = []
-sm_rows       = []
-df_rows       = []
-nb_rows       = []
-sj_rows       = []
-active_pl     = []; disabled_pl = []
-active_sm     = []
-active_df     = []
-active_nb     = []
-active_sj     = []
-
-# ── Data Pipelines ─────────────────────────────────────────────────────────────
-if 'pipelines' in selected_types:
-    _t0 = time.time()
-    console.rule('[bold]Data Pipelines[/bold]', style='cyan')
-    console.print()
-    pipelines = requests.get(
-        BASE + '/workspaces/' + WORKSPACE_ID + '/items?type=DataPipeline',
-        headers=FAB, timeout=TIMEOUT
-    ).json().get('value', [])
-    console.print(f'  [dim]{len(pipelines)} pipelines found.[/dim]')
-    console.print()
-
-    definition_errors = 0
-    with make_progress() as progress:
-        task = progress.add_task('', total=len(pipelines), item='Initialising...')
-        for pl in pipelines:
-            name = pl['displayName']
-            pid  = pl['id']
-            progress.update(task, item=trunc(name))
-
-            if pid in checkpoint:
-                c           = checkpoint[pid]
-                schedules   = c['schedules']
-                invokes     = c['invokes']
-                last_run    = c['last_run']
-                last_status = c['last_status']
-            else:
-                parts = get_definition_parts(pid)
-                if parts is None:
-                    definition_errors += 1
-                    parts = []
-                schedules   = parse_schedule(parts)
-                invokes     = get_invoke_targets(parts)
-                last_run, last_status = get_last_run(pid)
-                checkpoint[pid] = {
-                    'schedules': schedules, 'invokes': invokes,
-                    'last_run': last_run, 'last_status': last_status,
-                }
-                CHECKPOINT_FILE.write_text(json.dumps(checkpoint), encoding='utf-8')
-
-            for child in invokes:
-                parent_child.append({'Parent Pipeline': name, 'Child Pipeline': child})
-
-            tags = []
-            if schedules:
-                active_count   = sum(1 for s in schedules if s['enabled'])
-                disabled_count = len(schedules) - active_count
-                if active_count:
-                    tags.append(f'[green]{active_count} active schedule{"s" if active_count > 1 else ""}[/green]')
-                if disabled_count:
-                    tags.append(f'[yellow]{disabled_count} disabled[/yellow]')
-            if invokes:
-                tags.append(f'[cyan]→ {len(invokes)} child{"ren" if len(invokes) > 1 else ""}[/cyan]')
-            if tags:
-                console.print(f'  [dim]{trunc(name, 60)}[/dim]  {"  ·  ".join(tags)}')
-
-            base_row = {
-                'Item Type': 'Data Pipeline', 'Name': name,
-                'Last Run': last_run, 'Last Run Status': last_status,
-                'Invokes (children)': ', '.join(invokes) if invokes else '',
-            }
-            if schedules:
-                for s in schedules:
-                    pipeline_rows.append({**base_row,
-                        'Enabled':        'Yes' if s['enabled'] else 'No (Disabled)',
-                        'Schedule Type':  s['type'],    'Run Time(s)':   s['times'],
-                        'Timezone':       s['timezone'], 'Weekdays':      s['weekdays'],
-                        'Interval':       s['interval'], 'Schedule From': s['start_date'],
-                        'Schedule Until': s['end_date'],
-                    })
-            elif include_unscheduled:
-                pipeline_rows.append({**base_row,
-                    'Enabled': 'No schedule', 'Schedule Type': '', 'Run Time(s)': '',
-                    'Timezone': '', 'Weekdays': '', 'Interval': '',
-                    'Schedule From': '', 'Schedule Until': '',
-                })
-
-            progress.advance(task)
-
-    active_pl   = [r for r in pipeline_rows if r['Enabled'] == 'Yes']
-    disabled_pl = [r for r in pipeline_rows if 'Disabled' in r['Enabled']]
-    console.print()
-    summary_parts = [
-        f'[green]{len(active_pl)} active[/green]',
-        f'[yellow]{len(disabled_pl)} disabled[/yellow]',
-        f'[cyan]{len(parent_child)} parent-child relationships[/cyan]',
-    ]
-    if definition_errors:
-        summary_parts.append(f'[red]{definition_errors} could not be fetched (network error)[/red]')
-    console.print(f'  [bold green]✓[/bold green]  ' + '  ·  '.join(summary_parts))
-    console.print()
-    section_times['pipelines'] = time.time() - _t0
-
-# ── Semantic Models ────────────────────────────────────────────────────────────
-if 'semantic_models' in selected_types:
-    _t0 = time.time()
-    console.rule('[bold]Semantic Models[/bold]', style='cyan')
-    console.print()
-    try:
-        datasets = requests.get(
-            PBI_BASE + '/groups/' + WORKSPACE_ID + '/datasets',
-            headers=PBI, timeout=TIMEOUT
-        ).json().get('value', [])
-    except Exception as e:
-        console.print(f'  [red]Could not reach the Power BI API: {type(e).__name__}. Check your network connection.[/red]')
-        datasets = []
-    console.print(f'  [dim]{len(datasets)} semantic models found.[/dim]')
-    console.print()
-
-    with make_progress() as progress:
-        task = progress.add_task('', total=len(datasets), item='Initialising...')
-        for ds in datasets:
-            name = ds.get('name', 'Unknown')
-            did  = ds['id']
-            progress.update(task, item=trunc(name))
-            try:
-                sched = requests.get(
-                    PBI_BASE + '/groups/' + WORKSPACE_ID + '/datasets/' + did + '/refreshSchedule',
-                    headers=PBI, timeout=TIMEOUT
-                ).json()
-            except Exception:
-                sched = {}
-            try:
-                history  = requests.get(
-                    PBI_BASE + '/groups/' + WORKSPACE_ID + '/datasets/' + did + '/refreshes?$top=1',
-                    headers=PBI, timeout=TIMEOUT
-                ).json()
-                hist        = history.get('value', [])
-                last_run    = fmt_time(hist[0].get('startTime', '')) if hist else 'Never run'
-                last_status = hist[0].get('status', 'N/A') if hist else 'N/A'
-            except Exception:
-                last_run, last_status = 'Error', 'Error'
-
-            enabled = sched.get('enabled', False)
-            times   = sched.get('times', [])
-            days    = sched.get('days', [])
-
-            if enabled:
-                console.print(f'  [dim]{trunc(name, 60)}[/dim]  [green]active refresh[/green]')
-
-            if enabled or include_unscheduled:
-                sm_rows.append({
-                    'Item Type': 'Semantic Model', 'Name': name,
-                    'Enabled':        'Yes' if enabled else 'No schedule',
-                    'Schedule Type':  sched.get('frequency', ''),
-                    'Run Time(s)':    ', '.join(times),
-                    'Timezone':       sched.get('localTimeZoneId', 'UTC'),
-                    'Weekdays':       ', '.join(days) if days else '',
-                    'Interval': '', 'Schedule From': '', 'Schedule Until': '',
-                    'Last Run': last_run, 'Last Run Status': last_status,
-                    'Invokes (children)': '',
-                })
-            progress.advance(task)
-
-    active_sm = [r for r in sm_rows if r['Enabled'] == 'Yes']
-    console.print()
-    console.print(
-        f'  [bold green]✓[/bold green]  '
-        f'[green]{len(active_sm)} with active refresh schedule[/green]'
-        + (f'  ·  [dim]{len(sm_rows) - len(active_sm)} without[/dim]' if include_unscheduled else '')
-    )
-    console.print()
-    section_times['semantic_models'] = time.time() - _t0
-
-# ── Dataflows ──────────────────────────────────────────────────────────────────
-if 'dataflows' in selected_types:
-    _t0 = time.time()
-    console.rule('[bold]Dataflows[/bold]', style='cyan')
-    console.print()
-    all_items = requests.get(
-        BASE + '/workspaces/' + WORKSPACE_ID + '/items',
-        headers=FAB, timeout=TIMEOUT
-    ).json().get('value', [])
-    dataflows = [it for it in all_items if it.get('type') == 'Dataflow']
-    console.print(f'  [dim]{len(dataflows)} dataflows found.[/dim]')
-
-    if not dataflows:
-        console.print('  [dim]No dataflows to process.[/dim]')
-    else:
-        console.print()
-        with make_progress() as progress:
-            task = progress.add_task('', total=len(dataflows), item='Initialising...')
-            for df in dataflows:
-                name = df['displayName']
-                did  = df['id']
-                progress.update(task, item=trunc(name))
-                try:
-                    sched = requests.get(
-                        PBI_BASE + '/groups/' + WORKSPACE_ID + '/dataflows/' + did + '/refreshSchedule',
-                        headers=PBI, timeout=TIMEOUT
-                    ).json()
-                except Exception:
-                    sched = {}
-                try:
-                    history  = requests.get(
-                        PBI_BASE + '/groups/' + WORKSPACE_ID + '/dataflows/' + did + '/transactions?$top=1',
-                        headers=PBI, timeout=TIMEOUT
-                    ).json()
-                    hist        = history.get('value', [])
-                    last_run    = fmt_time(hist[0].get('startTime', '')) if hist else 'Never run'
-                    last_status = hist[0].get('status', 'N/A') if hist else 'N/A'
-                except Exception:
-                    last_run, last_status = 'Error', 'Error'
-
-                enabled      = sched.get('enabled', False)
-                times        = sched.get('times', [])
-                days         = sched.get('days', [])
-                has_schedule = 'enabled' in sched or 'times' in sched
-
-                if enabled:
-                    console.print(f'  [dim]{trunc(name, 60)}[/dim]  [green]active refresh[/green]')
-
-                if enabled or include_unscheduled:
-                    df_rows.append({
-                        'Item Type': 'Dataflow', 'Name': name,
-                        'Enabled':        'Yes' if enabled else ('No schedule' if not has_schedule else 'No (Disabled)'),
-                        'Schedule Type':  sched.get('frequency', ''),
-                        'Run Time(s)':    ', '.join(times),
-                        'Timezone':       sched.get('localTimeZoneId', 'UTC'),
-                        'Weekdays':       ', '.join(days) if days else '',
-                        'Interval': '', 'Schedule From': '', 'Schedule Until': '',
-                        'Last Run': last_run, 'Last Run Status': last_status,
-                        'Invokes (children)': '',
-                    })
-                progress.advance(task)
-
-    active_df = [r for r in df_rows if r['Enabled'] == 'Yes']
-    console.print()
-    console.print(
-        f'  [bold green]✓[/bold green]  '
-        f'[green]{len(active_df)} with active refresh schedule[/green]'
-        + (f'  ·  [dim]{len(df_rows) - len(active_df)} without[/dim]' if include_unscheduled else '')
-    )
-    console.print()
-    section_times['dataflows'] = time.time() - _t0
-
-# ── Notebooks ──────────────────────────────────────────────────────────────────
-if 'notebooks' in selected_types:
-    _t0 = time.time()
-    console.rule('[bold]Notebooks[/bold]', style='cyan')
-    console.print()
-    nb_rows   = process_definition_items('Notebook', 'Notebook')
-    active_nb = [r for r in nb_rows if r['Enabled'] == 'Yes']
-    console.print()
-    console.print(
-        f'  [bold green]✓[/bold green]  '
-        f'[green]{len(active_nb)} with active schedule[/green]'
-    )
-    console.print()
-    section_times['notebooks'] = time.time() - _t0
-
-# ── Spark Job Definitions ──────────────────────────────────────────────────────
-if 'spark_jobs' in selected_types:
-    _t0 = time.time()
-    console.rule('[bold]Spark Job Definitions[/bold]', style='cyan')
-    console.print()
-    sj_rows   = process_definition_items('SparkJobDefinition', 'Spark Job Definition')
-    active_sj = [r for r in sj_rows if r['Enabled'] == 'Yes']
-    console.print()
-    console.print(
-        f'  [bold green]✓[/bold green]  '
-        f'[green]{len(active_sj)} with active schedule[/green]'
-    )
-    console.print()
-    section_times['spark_jobs'] = time.time() - _t0
-
-# ── Build Excel ────────────────────────────────────────────────────────────────
-console.rule('[bold]Building Excel[/bold]', style='cyan')
-console.print()
-
-NAVY     = 'FF1F3864'
-BLUE     = 'FF2E75B6'
-WHITE    = 'FFFFFFFF'
-LIGHT    = 'FFD6E4F7'
-GREY     = 'FFF2F2F2'
-GREEN_BG = 'FFE2EFDA'
-GREEN_FG = 'FF375623'
-RED_BG   = 'FFFFC7CE'
-RED_FG   = 'FF9C0006'
-AMBER_BG = 'FFFFFF99'
-AMBER_FG = 'FF833C00'
-thin = Side(style='thin', color='FFD9D9D9')
-bdr  = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-COLS = [
-    'Item Type', 'Name', 'Enabled', 'Schedule Type', 'Run Time(s)', 'Timezone',
-    'Weekdays', 'Interval', 'Schedule From', 'Schedule Until',
-    'Last Run', 'Last Run Status', 'Invokes (children)',
-]
-PARENT_COLS = ['Parent Pipeline', 'Child Pipeline']
-
-stamp      = f'{WORKSPACE_NAME}  |  Extracted: ' + datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-all_active = active_pl + active_sm + active_df + active_nb + active_sj
-
-
+# ── Excel helpers ──────────────────────────────────────────────────────────────
 def make_header(ws, title, subtitle, cols):
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cols))
     c = ws.cell(1, 1)
@@ -793,16 +378,16 @@ def make_header(ws, title, subtitle, cols):
 
 
 def write_rows(ws, rows, cols):
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     for i, row in enumerate(rows):
         r   = 4 + i
-        alt = (i % 2 == 0)
+        alt = i % 2 == 0
         for col, key in enumerate(cols, 1):
             c   = ws.cell(r, col)
             val = row.get(key, '')
             c.value     = val
             c.font      = Font(name='Arial', size=9)
-            c.alignment = Alignment(vertical='center', wrap_text=(col <= 2))
+            c.alignment = Alignment(vertical='center', wrap_text=col <= 2)
             c.border    = bdr
 
             if key == 'Enabled':
@@ -843,133 +428,564 @@ def set_widths(ws, widths):
         ws.column_dimensions[get_column_letter(col)].width = w
 
 
-wb     = openpyxl.Workbook()
-widths = [14, 40, 14, 13, 14, 24, 16, 10, 13, 13, 22, 16, 40]
+# ── Entry point ────────────────────────────────────────────────────────────────
+def main():  # pragma: no cover
+    global WORKSPACE_ID, FAB, PBI, INCLUDE_UNSCHEDULED, CHECKPOINT_FILE
 
-ws_active = wb.active
-ws_active.title = 'Active Schedules'
-make_header(ws_active, f'{WORKSPACE_NAME}  |  All Active Schedules',
-    stamp + f'  |  {len(all_active)} active scheduled items', COLS)
-write_rows(ws_active, all_active, COLS)
-set_widths(ws_active, widths)
+    # Load CLIENT_ID
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    try:
+        from config import CLIENT_ID  # noqa: PLC0415
+    except ImportError:
+        console.print('[bold red]ERROR: config.py not found.[/bold red]')
+        console.print('Copy config.example.py to config.py and add your CLIENT_ID.')
+        sys.exit(1)
 
-if 'pipelines' in selected_types:
-    ws = wb.create_sheet('Pipelines')
-    make_header(ws, f'{WORKSPACE_NAME}  |  Data Pipelines',
-        stamp + f'  |  {len(pipeline_rows)} shown  |  {len(active_pl)} active  |  {len(disabled_pl)} disabled', COLS)
-    write_rows(ws, pipeline_rows, COLS)
-    set_widths(ws, widths)
-
-if 'semantic_models' in selected_types:
-    ws = wb.create_sheet('Semantic Models')
-    make_header(ws, f'{WORKSPACE_NAME}  |  Semantic Models',
-        stamp + f'  |  {len(sm_rows)} shown  |  {len(active_sm)} with active refresh', COLS)
-    write_rows(ws, sm_rows, COLS)
-    set_widths(ws, widths)
-
-if 'dataflows' in selected_types:
-    ws = wb.create_sheet('Dataflows')
-    make_header(ws, f'{WORKSPACE_NAME}  |  Dataflows',
-        stamp + f'  |  {len(df_rows)} shown  |  {len(active_df)} with active refresh', COLS)
-    write_rows(ws, df_rows, COLS)
-    set_widths(ws, widths)
-
-if 'notebooks' in selected_types:
-    ws = wb.create_sheet('Notebooks')
-    make_header(ws, f'{WORKSPACE_NAME}  |  Notebooks',
-        stamp + f'  |  {len(nb_rows)} shown  |  {len(active_nb)} with active schedule', COLS)
-    write_rows(ws, nb_rows, COLS)
-    set_widths(ws, widths)
-
-if 'spark_jobs' in selected_types:
-    ws = wb.create_sheet('Spark Job Definitions')
-    make_header(ws, f'{WORKSPACE_NAME}  |  Spark Job Definitions',
-        stamp + f'  |  {len(sj_rows)} shown  |  {len(active_sj)} with active schedule', COLS)
-    write_rows(ws, sj_rows, COLS)
-    set_widths(ws, widths)
-
-if 'pipelines' in selected_types:
-    ws = wb.create_sheet('Pipeline Relationships')
-    make_header(ws, f'{WORKSPACE_NAME}  |  Pipeline Parent-Child Relationships',
-        stamp + f'  |  {len(parent_child)} invoke relationships mapped', PARENT_COLS)
-    write_rows(ws, parent_child, PARENT_COLS)
-    set_widths(ws, [50, 50])
-
-OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-wb.save(str(OUTPUT_PATH))
-
-if CHECKPOINT_FILE.exists():
-    CHECKPOINT_FILE.unlink()
-
-# ── Summary ────────────────────────────────────────────────────────────────────
-console.print(f'  [bold green]✓[/bold green] Excel file saved.')
-console.print()
-
-
-def fmt_dur(seconds):
-    seconds = int(seconds)
-    h, rem  = divmod(seconds, 3600)
-    m, s    = divmod(rem, 60)
-    if h:
-        return f'{h}h {m}m {s}s'
-    if m:
-        return f'{m}m {s}s'
-    return f'{s}s'
-
-
-total_elapsed = time.time() - run_start
-
-summary = Table(box=box.ROUNDED, border_style='cyan', show_header=True, header_style='bold white on #1F3864')
-summary.add_column('Item Type',  style='dim',        min_width=26)
-summary.add_column('Active',     style='bold green', justify='right', min_width=8)
-summary.add_column('Inactive',   style='yellow',     justify='right', min_width=10)
-summary.add_column('In Output',  style='dim',        justify='right', min_width=10)
-summary.add_column('Time taken', style='cyan',       justify='right', min_width=12)
-
-if 'pipelines' in selected_types:
-    summary.add_row('Data Pipelines', str(len(active_pl)), str(len(disabled_pl)),
-                    str(len(pipeline_rows)), fmt_dur(section_times.get('pipelines', 0)))
-if 'semantic_models' in selected_types:
-    summary.add_row('Semantic Models', str(len(active_sm)), str(len(sm_rows) - len(active_sm)),
-                    str(len(sm_rows)), fmt_dur(section_times.get('semantic_models', 0)))
-if 'dataflows' in selected_types:
-    summary.add_row('Dataflows', str(len(active_df)), str(len(df_rows) - len(active_df)),
-                    str(len(df_rows)), fmt_dur(section_times.get('dataflows', 0)))
-if 'notebooks' in selected_types:
-    summary.add_row('Notebooks', str(len(active_nb)), str(len(nb_rows) - len(active_nb)),
-                    str(len(nb_rows)), fmt_dur(section_times.get('notebooks', 0)))
-if 'spark_jobs' in selected_types:
-    summary.add_row('Spark Job Definitions', str(len(active_sj)), str(len(sj_rows) - len(active_sj)),
-                    str(len(sj_rows)), fmt_dur(section_times.get('spark_jobs', 0)))
-summary.add_section()
-summary.add_row('[bold]Total active schedules[/bold]', f'[bold green]{len(all_active)}[/bold green]', '', '', '')
-if 'pipelines' in selected_types:
-    summary.add_row('[bold]Pipeline relationships[/bold]', f'[bold cyan]{len(parent_child)}[/bold cyan]', '', '', '')
-summary.add_section()
-summary.add_row('[bold]Total run time[/bold]', '', '', '', f'[bold cyan]{fmt_dur(total_elapsed)}[/bold cyan]')
-
-console.print(summary)
-
-if all_active:
-    dates_table = Table(
-        box=box.ROUNDED, border_style='cyan', show_header=True,
-        header_style='bold white on #1F3864',
-        title='[bold]Active Schedule Windows[/bold]',
-    )
-    dates_table.add_column('Name',       style='bold',   min_width=30)
-    dates_table.add_column('Type',       style='dim',    min_width=20)
-    dates_table.add_column('Start Date', style='green',  min_width=13, justify='center')
-    dates_table.add_column('End Date',   style='yellow', min_width=13, justify='center')
-    for row in sorted(all_active, key=lambda r: (r['Item Type'], r['Name'])):
-        dates_table.add_row(
-            row['Name'],
-            row['Item Type'],
-            row.get('Schedule From') or '[dim]not set[/dim]',
-            row.get('Schedule Until') or '[dim]not set[/dim]',
-        )
+    # Banner
     console.print()
-    console.print(dates_table)
+    console.print(Panel.fit(
+        '[bold cyan]Fabric Schedule Extractor[/bold cyan]',
+        border_style='cyan',
+    ))
+    console.print()
 
-console.print()
-console.print(f'  [bold]Saved to:[/bold] [cyan]{OUTPUT_PATH}[/cyan]')
-console.print()
+    # Auth
+    cache = msal.SerializableTokenCache()
+    if CACHE_FILE.exists():
+        cache.deserialize(CACHE_FILE.read_text(encoding='utf-8'))
+    app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY, token_cache=cache)
+
+    console.print('[dim]Authenticating...[/dim]')
+    fab_at = get_token(FAB_SCOPES, app, cache)
+    pbi_at = get_token(PBI_SCOPES, app, cache)
+    FAB = {'Authorization': 'Bearer ' + fab_at, 'Content-Type': 'application/json'}
+    PBI = {'Authorization': 'Bearer ' + pbi_at}
+    console.print('[bold green]✓[/bold green] Authenticated successfully.')
+    console.print()
+
+    run_start     = time.time()
+    section_times = {}
+
+    # Workspace selection
+    console.print('[dim]Fetching available workspaces...[/dim]')
+    ws_resp = requests.get(BASE + '/workspaces', headers=FAB, timeout=TIMEOUT)
+    if ws_resp.status_code != 200:
+        console.print(f'[bold red]ERROR: Could not list workspaces ({ws_resp.status_code})[/bold red]')
+        console.print(ws_resp.text[:500])
+        sys.exit(1)
+    all_workspaces = ws_resp.json().get('value', [])
+    console.print(f'[bold green]✓[/bold green] {len(all_workspaces)} workspaces available.')
+    console.print()
+
+    search      = console.input('[bold]Enter workspace name[/bold] [dim](or part of it)[/dim]: ').strip().lower()
+    search_norm = search.replace(' ', '').replace('-', '')
+    matches     = [
+        w for w in all_workspaces
+        if search in w['displayName'].lower()
+        or search_norm in w['displayName'].lower().replace(' ', '').replace('-', '')
+    ]
+
+    if not matches:
+        console.print(f'\n[red]No workspace found matching "[bold]{search}[/bold]". Available workspaces:[/red]')
+        for w in sorted(all_workspaces, key=lambda x: x['displayName']):
+            console.print(f'  {w["displayName"]}')
+        sys.exit(1)
+
+    if len(matches) == 1:
+        selected_workspace = matches[0]
+    else:
+        console.print('\n[yellow]Multiple matches found:[/yellow]')
+        for i, w in enumerate(matches, 1):
+            console.print(f'  [[bold]{i}[/bold]] {w["displayName"]}')
+        choice = console.input('Enter number: ').strip()
+        try:
+            selected_workspace = matches[int(choice) - 1]
+        except (ValueError, IndexError):
+            console.print('[red]Invalid choice.[/red]')
+            sys.exit(1)
+
+    WORKSPACE_ID   = selected_workspace['id']
+    workspace_name = selected_workspace['displayName']
+    console.print()
+    console.print(f'  [bold]Workspace:[/bold] [cyan]{workspace_name}[/cyan]')
+    console.print(f'  [bold]ID:[/bold]        [dim]{WORKSPACE_ID}[/dim]')
+    console.print()
+
+    output_path     = Path.home() / 'Downloads' / f'{sanitize_filename(workspace_name)} - Schedule Inventory.xlsx'
+    CHECKPOINT_FILE = Path.home() / f'.fabric_checkpoint_{WORKSPACE_ID}.json'
+
+    # Item type selection
+    item_menu = [
+        ('pipelines',       'Data Pipelines'),
+        ('semantic_models', 'Semantic Models'),
+        ('dataflows',       'Dataflows'),
+        ('notebooks',       'Notebooks'),
+        ('spark_jobs',      'Spark Job Definitions'),
+    ]
+
+    console.print('[bold]Which item types would you like to extract?[/bold]')
+    console.print()
+    for i, (_, label) in enumerate(item_menu, 1):
+        console.print(f'  [[bold cyan]{i}[/bold cyan]] {label}')
+    console.print('  [[bold cyan]A[/bold cyan]] All of the above [dim](default)[/dim]')
+    console.print()
+    raw = console.input('Enter numbers separated by commas, or press [bold]Enter[/bold] for all: ').strip().upper()
+
+    if not raw or raw == 'A':
+        selected_types = {key for key, _ in item_menu}
+    else:
+        selected_types = set()
+        for s in raw.split(','):
+            s = s.strip()
+            if s.isdigit():
+                idx = int(s) - 1
+                if 0 <= idx < len(item_menu):
+                    selected_types.add(item_menu[idx][0])
+        if not selected_types:
+            console.print('[yellow]  No valid selection, defaulting to all.[/yellow]')
+            selected_types = {key for key, _ in item_menu}
+
+    console.print()
+    console.print('[bold]Extracting:[/bold]')
+    for key, label in item_menu:
+        if key in selected_types:
+            console.print(f'  [green]+[/green] {label}')
+    console.print()
+
+    INCLUDE_UNSCHEDULED = console.input(
+        'Include items with [bold]no schedule[/bold] in the output? [[bold]Y[/bold]/n]: '
+    ).strip().lower() != 'n'
+    console.print()
+
+    # Checkpoint
+    checkpoint = {}
+    if CHECKPOINT_FILE.exists():
+        age_seconds = time.time() - CHECKPOINT_FILE.stat().st_mtime
+        age_minutes = int(age_seconds / 60)
+        if age_seconds < 3600:
+            resp = console.input(
+                f'[yellow]Found cached pipeline data from {age_minutes} minute(s) ago.[/yellow] '
+                f'Resume from where it left off? [y/[bold]N[/bold]]: '
+            ).strip().lower()
+            if resp == 'y':
+                try:
+                    checkpoint = json.loads(CHECKPOINT_FILE.read_text(encoding='utf-8'))
+                    console.print(f'[green]✓[/green] Resuming, {len(checkpoint)} pipelines already cached.')
+                except Exception:
+                    checkpoint = {}
+            else:
+                CHECKPOINT_FILE.unlink()
+                console.print('[dim]  Starting fresh.[/dim]')
+        else:
+            console.print(f'[dim]  Cached data is {age_minutes} minutes old, discarding and starting fresh.[/dim]')
+            CHECKPOINT_FILE.unlink()
+    console.print()
+
+    # Result containers
+    pipeline_rows = []
+    parent_child  = []
+    sm_rows       = []
+    df_rows       = []
+    nb_rows       = []
+    sj_rows       = []
+    active_pl     = []
+    disabled_pl   = []
+    active_sm     = []
+    active_df     = []
+    active_nb     = []
+    active_sj     = []
+
+    # Data Pipelines
+    if 'pipelines' in selected_types:
+        _t0 = time.time()
+        console.rule('[bold]Data Pipelines[/bold]', style='cyan')
+        console.print()
+        pipelines = requests.get(
+            BASE + '/workspaces/' + WORKSPACE_ID + '/items?type=DataPipeline',
+            headers=FAB, timeout=TIMEOUT
+        ).json().get('value', [])
+        console.print(f'  [dim]{len(pipelines)} pipelines found.[/dim]')
+        console.print()
+
+        definition_errors = 0
+        with make_progress() as progress:
+            task = progress.add_task('', total=len(pipelines), item='Initialising...')
+            for pl in pipelines:
+                name = pl['displayName']
+                pid  = pl['id']
+                progress.update(task, item=trunc(name))
+
+                if pid in checkpoint:
+                    c           = checkpoint[pid]
+                    schedules   = c['schedules']
+                    invokes     = c['invokes']
+                    last_run    = c['last_run']
+                    last_status = c['last_status']
+                else:
+                    parts = get_definition_parts(pid)
+                    if parts is None:
+                        definition_errors += 1
+                        parts = []
+                    schedules   = parse_schedule(parts)
+                    invokes     = get_invoke_targets(parts)
+                    last_run, last_status = get_last_run(pid)
+                    checkpoint[pid] = {
+                        'schedules': schedules, 'invokes': invokes,
+                        'last_run': last_run, 'last_status': last_status,
+                    }
+                    CHECKPOINT_FILE.write_text(json.dumps(checkpoint), encoding='utf-8')
+
+                for child in invokes:
+                    parent_child.append({'Parent Pipeline': name, 'Child Pipeline': child})
+
+                tags = []
+                if schedules:
+                    active_count   = sum(1 for s in schedules if s['enabled'])
+                    disabled_count = len(schedules) - active_count
+                    if active_count:
+                        tags.append(f'[green]{active_count} active schedule{"s" if active_count > 1 else ""}[/green]')
+                    if disabled_count:
+                        tags.append(f'[yellow]{disabled_count} disabled[/yellow]')
+                if invokes:
+                    tags.append(f'[cyan]-> {len(invokes)} child{"ren" if len(invokes) > 1 else ""}[/cyan]')
+                if tags:
+                    console.print(f'  [dim]{trunc(name, 60)}[/dim]  {"  .  ".join(tags)}')
+
+                base_row = {
+                    'Item Type': 'Data Pipeline', 'Name': name,
+                    'Last Run': last_run, 'Last Run Status': last_status,
+                    'Invokes (children)': ', '.join(invokes) if invokes else '',
+                }
+                if schedules:
+                    for s in schedules:
+                        pipeline_rows.append({**base_row,
+                            'Enabled':        'Yes' if s['enabled'] else 'No (Disabled)',
+                            'Schedule Type':  s['type'],     'Run Time(s)':   s['times'],
+                            'Timezone':       s['timezone'], 'Weekdays':      s['weekdays'],
+                            'Interval':       s['interval'], 'Schedule From': s['start_date'],
+                            'Schedule Until': s['end_date'],
+                        })
+                elif INCLUDE_UNSCHEDULED:
+                    pipeline_rows.append({**base_row,
+                        'Enabled': 'No schedule', 'Schedule Type': '', 'Run Time(s)': '',
+                        'Timezone': '', 'Weekdays': '', 'Interval': '',
+                        'Schedule From': '', 'Schedule Until': '',
+                    })
+
+                progress.advance(task)
+
+        active_pl   = [r for r in pipeline_rows if r['Enabled'] == 'Yes']
+        disabled_pl = [r for r in pipeline_rows if 'Disabled' in r['Enabled']]
+        console.print()
+        summary_parts = [
+            f'[green]{len(active_pl)} active[/green]',
+            f'[yellow]{len(disabled_pl)} disabled[/yellow]',
+            f'[cyan]{len(parent_child)} parent-child relationships[/cyan]',
+        ]
+        if definition_errors:
+            summary_parts.append(f'[red]{definition_errors} could not be fetched (network error)[/red]')
+        console.print('  [bold green]✓[/bold green]  ' + '  .  '.join(summary_parts))
+        console.print()
+        section_times['pipelines'] = time.time() - _t0
+
+    # Semantic Models
+    if 'semantic_models' in selected_types:
+        _t0 = time.time()
+        console.rule('[bold]Semantic Models[/bold]', style='cyan')
+        console.print()
+        try:
+            datasets = requests.get(
+                PBI_BASE + '/groups/' + WORKSPACE_ID + '/datasets',
+                headers=PBI, timeout=TIMEOUT
+            ).json().get('value', [])
+        except Exception as e:
+            console.print(f'  [red]Could not reach the Power BI API: {type(e).__name__}. Check your network connection.[/red]')
+            datasets = []
+        console.print(f'  [dim]{len(datasets)} semantic models found.[/dim]')
+        console.print()
+
+        with make_progress() as progress:
+            task = progress.add_task('', total=len(datasets), item='Initialising...')
+            for ds in datasets:
+                name = ds.get('name', 'Unknown')
+                did  = ds['id']
+                progress.update(task, item=trunc(name))
+                try:
+                    sched = requests.get(
+                        PBI_BASE + '/groups/' + WORKSPACE_ID + '/datasets/' + did + '/refreshSchedule',
+                        headers=PBI, timeout=TIMEOUT
+                    ).json()
+                except Exception:
+                    sched = {}
+                try:
+                    history  = requests.get(
+                        PBI_BASE + '/groups/' + WORKSPACE_ID + '/datasets/' + did + '/refreshes?$top=1',
+                        headers=PBI, timeout=TIMEOUT
+                    ).json()
+                    hist        = history.get('value', [])
+                    last_run    = fmt_time(hist[0].get('startTime', '')) if hist else 'Never run'
+                    last_status = hist[0].get('status', 'N/A') if hist else 'N/A'
+                except Exception:
+                    last_run, last_status = 'Error', 'Error'
+
+                enabled = sched.get('enabled', False)
+                times   = sched.get('times', [])
+                days    = sched.get('days', [])
+
+                if enabled:
+                    console.print(f'  [dim]{trunc(name, 60)}[/dim]  [green]active refresh[/green]')
+
+                if enabled or INCLUDE_UNSCHEDULED:
+                    sm_rows.append({
+                        'Item Type': 'Semantic Model', 'Name': name,
+                        'Enabled':        'Yes' if enabled else 'No schedule',
+                        'Schedule Type':  sched.get('frequency', ''),
+                        'Run Time(s)':    ', '.join(times),
+                        'Timezone':       sched.get('localTimeZoneId', 'UTC'),
+                        'Weekdays':       ', '.join(days) if days else '',
+                        'Interval': '', 'Schedule From': '', 'Schedule Until': '',
+                        'Last Run': last_run, 'Last Run Status': last_status,
+                        'Invokes (children)': '',
+                    })
+                progress.advance(task)
+
+        active_sm = [r for r in sm_rows if r['Enabled'] == 'Yes']
+        console.print()
+        console.print(
+            f'  [bold green]✓[/bold green]  '
+            f'[green]{len(active_sm)} with active refresh schedule[/green]'
+            + (f'  .  [dim]{len(sm_rows) - len(active_sm)} without[/dim]' if INCLUDE_UNSCHEDULED else '')
+        )
+        console.print()
+        section_times['semantic_models'] = time.time() - _t0
+
+    # Dataflows
+    if 'dataflows' in selected_types:
+        _t0 = time.time()
+        console.rule('[bold]Dataflows[/bold]', style='cyan')
+        console.print()
+        all_items = requests.get(
+            BASE + '/workspaces/' + WORKSPACE_ID + '/items',
+            headers=FAB, timeout=TIMEOUT
+        ).json().get('value', [])
+        dataflows = [it for it in all_items if it.get('type') == 'Dataflow']
+        console.print(f'  [dim]{len(dataflows)} dataflows found.[/dim]')
+
+        if not dataflows:
+            console.print('  [dim]No dataflows to process.[/dim]')
+        else:
+            console.print()
+            with make_progress() as progress:
+                task = progress.add_task('', total=len(dataflows), item='Initialising...')
+                for df in dataflows:
+                    name = df['displayName']
+                    did  = df['id']
+                    progress.update(task, item=trunc(name))
+                    try:
+                        sched = requests.get(
+                            PBI_BASE + '/groups/' + WORKSPACE_ID + '/dataflows/' + did + '/refreshSchedule',
+                            headers=PBI, timeout=TIMEOUT
+                        ).json()
+                    except Exception:
+                        sched = {}
+                    try:
+                        history  = requests.get(
+                            PBI_BASE + '/groups/' + WORKSPACE_ID + '/dataflows/' + did + '/transactions?$top=1',
+                            headers=PBI, timeout=TIMEOUT
+                        ).json()
+                        hist        = history.get('value', [])
+                        last_run    = fmt_time(hist[0].get('startTime', '')) if hist else 'Never run'
+                        last_status = hist[0].get('status', 'N/A') if hist else 'N/A'
+                    except Exception:
+                        last_run, last_status = 'Error', 'Error'
+
+                    enabled      = sched.get('enabled', False)
+                    times        = sched.get('times', [])
+                    days         = sched.get('days', [])
+                    has_schedule = 'enabled' in sched or 'times' in sched
+
+                    if enabled:
+                        console.print(f'  [dim]{trunc(name, 60)}[/dim]  [green]active refresh[/green]')
+
+                    if enabled or INCLUDE_UNSCHEDULED:
+                        df_rows.append({
+                            'Item Type': 'Dataflow', 'Name': name,
+                            'Enabled':        'Yes' if enabled else ('No schedule' if not has_schedule else 'No (Disabled)'),
+                            'Schedule Type':  sched.get('frequency', ''),
+                            'Run Time(s)':    ', '.join(times),
+                            'Timezone':       sched.get('localTimeZoneId', 'UTC'),
+                            'Weekdays':       ', '.join(days) if days else '',
+                            'Interval': '', 'Schedule From': '', 'Schedule Until': '',
+                            'Last Run': last_run, 'Last Run Status': last_status,
+                            'Invokes (children)': '',
+                        })
+                    progress.advance(task)
+
+        active_df = [r for r in df_rows if r['Enabled'] == 'Yes']
+        console.print()
+        console.print(
+            f'  [bold green]✓[/bold green]  '
+            f'[green]{len(active_df)} with active refresh schedule[/green]'
+            + (f'  .  [dim]{len(df_rows) - len(active_df)} without[/dim]' if INCLUDE_UNSCHEDULED else '')
+        )
+        console.print()
+        section_times['dataflows'] = time.time() - _t0
+
+    # Notebooks
+    if 'notebooks' in selected_types:
+        _t0 = time.time()
+        console.rule('[bold]Notebooks[/bold]', style='cyan')
+        console.print()
+        nb_rows   = process_definition_items('Notebook', 'Notebook')
+        active_nb = [r for r in nb_rows if r['Enabled'] == 'Yes']
+        console.print()
+        console.print(
+            f'  [bold green]✓[/bold green]  '
+            f'[green]{len(active_nb)} with active schedule[/green]'
+        )
+        console.print()
+        section_times['notebooks'] = time.time() - _t0
+
+    # Spark Job Definitions
+    if 'spark_jobs' in selected_types:
+        _t0 = time.time()
+        console.rule('[bold]Spark Job Definitions[/bold]', style='cyan')
+        console.print()
+        sj_rows   = process_definition_items('SparkJobDefinition', 'Spark Job Definition')
+        active_sj = [r for r in sj_rows if r['Enabled'] == 'Yes']
+        console.print()
+        console.print(
+            f'  [bold green]✓[/bold green]  '
+            f'[green]{len(active_sj)} with active schedule[/green]'
+        )
+        console.print()
+        section_times['spark_jobs'] = time.time() - _t0
+
+    # Build Excel
+    console.rule('[bold]Building Excel[/bold]', style='cyan')
+    console.print()
+
+    stamp      = f'{workspace_name}  |  Extracted: ' + datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    all_active = active_pl + active_sm + active_df + active_nb + active_sj
+    widths     = [14, 40, 14, 13, 14, 24, 16, 10, 13, 13, 22, 16, 40]
+
+    wb        = openpyxl.Workbook()
+    ws_active = wb.active
+    ws_active.title = 'Active Schedules'
+    make_header(ws_active, f'{workspace_name}  |  All Active Schedules',
+        stamp + f'  |  {len(all_active)} active scheduled items', COLS)
+    write_rows(ws_active, all_active, COLS)
+    set_widths(ws_active, widths)
+
+    if 'pipelines' in selected_types:
+        ws = wb.create_sheet('Pipelines')
+        make_header(ws, f'{workspace_name}  |  Data Pipelines',
+            stamp + f'  |  {len(pipeline_rows)} shown  |  {len(active_pl)} active  |  {len(disabled_pl)} disabled', COLS)
+        write_rows(ws, pipeline_rows, COLS)
+        set_widths(ws, widths)
+
+    if 'semantic_models' in selected_types:
+        ws = wb.create_sheet('Semantic Models')
+        make_header(ws, f'{workspace_name}  |  Semantic Models',
+            stamp + f'  |  {len(sm_rows)} shown  |  {len(active_sm)} with active refresh', COLS)
+        write_rows(ws, sm_rows, COLS)
+        set_widths(ws, widths)
+
+    if 'dataflows' in selected_types:
+        ws = wb.create_sheet('Dataflows')
+        make_header(ws, f'{workspace_name}  |  Dataflows',
+            stamp + f'  |  {len(df_rows)} shown  |  {len(active_df)} with active refresh', COLS)
+        write_rows(ws, df_rows, COLS)
+        set_widths(ws, widths)
+
+    if 'notebooks' in selected_types:
+        ws = wb.create_sheet('Notebooks')
+        make_header(ws, f'{workspace_name}  |  Notebooks',
+            stamp + f'  |  {len(nb_rows)} shown  |  {len(active_nb)} with active schedule', COLS)
+        write_rows(ws, nb_rows, COLS)
+        set_widths(ws, widths)
+
+    if 'spark_jobs' in selected_types:
+        ws = wb.create_sheet('Spark Job Definitions')
+        make_header(ws, f'{workspace_name}  |  Spark Job Definitions',
+            stamp + f'  |  {len(sj_rows)} shown  |  {len(active_sj)} with active schedule', COLS)
+        write_rows(ws, sj_rows, COLS)
+        set_widths(ws, widths)
+
+    if 'pipelines' in selected_types:
+        ws = wb.create_sheet('Pipeline Relationships')
+        make_header(ws, f'{workspace_name}  |  Pipeline Parent-Child Relationships',
+            stamp + f'  |  {len(parent_child)} invoke relationships mapped', PARENT_COLS)
+        write_rows(ws, parent_child, PARENT_COLS)
+        set_widths(ws, [50, 50])
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(output_path))
+
+    if CHECKPOINT_FILE.exists():
+        CHECKPOINT_FILE.unlink()
+
+    console.print('  [bold green]✓[/bold green] Excel file saved.')
+    console.print()
+
+    # Summary
+    total_elapsed = time.time() - run_start
+
+    summary = Table(box=box.ROUNDED, border_style='cyan', show_header=True, header_style='bold white on #1F3864')
+    summary.add_column('Item Type',  style='dim',        min_width=26)
+    summary.add_column('Active',     style='bold green', justify='right', min_width=8)
+    summary.add_column('Inactive',   style='yellow',     justify='right', min_width=10)
+    summary.add_column('In Output',  style='dim',        justify='right', min_width=10)
+    summary.add_column('Time taken', style='cyan',       justify='right', min_width=12)
+
+    if 'pipelines' in selected_types:
+        summary.add_row('Data Pipelines', str(len(active_pl)), str(len(disabled_pl)),
+                        str(len(pipeline_rows)), fmt_dur(section_times.get('pipelines', 0)))
+    if 'semantic_models' in selected_types:
+        summary.add_row('Semantic Models', str(len(active_sm)), str(len(sm_rows) - len(active_sm)),
+                        str(len(sm_rows)), fmt_dur(section_times.get('semantic_models', 0)))
+    if 'dataflows' in selected_types:
+        summary.add_row('Dataflows', str(len(active_df)), str(len(df_rows) - len(active_df)),
+                        str(len(df_rows)), fmt_dur(section_times.get('dataflows', 0)))
+    if 'notebooks' in selected_types:
+        summary.add_row('Notebooks', str(len(active_nb)), str(len(nb_rows) - len(active_nb)),
+                        str(len(nb_rows)), fmt_dur(section_times.get('notebooks', 0)))
+    if 'spark_jobs' in selected_types:
+        summary.add_row('Spark Job Definitions', str(len(active_sj)), str(len(sj_rows) - len(active_sj)),
+                        str(len(sj_rows)), fmt_dur(section_times.get('spark_jobs', 0)))
+    summary.add_section()
+    summary.add_row('[bold]Total active schedules[/bold]', f'[bold green]{len(all_active)}[/bold green]', '', '', '')
+    if 'pipelines' in selected_types:
+        summary.add_row('[bold]Pipeline relationships[/bold]', f'[bold cyan]{len(parent_child)}[/bold cyan]', '', '', '')
+    summary.add_section()
+    summary.add_row('[bold]Total run time[/bold]', '', '', '', f'[bold cyan]{fmt_dur(total_elapsed)}[/bold cyan]')
+
+    console.print(summary)
+
+    if all_active:
+        dates_table = Table(
+            box=box.ROUNDED, border_style='cyan', show_header=True,
+            header_style='bold white on #1F3864',
+            title='[bold]Active Schedule Windows[/bold]',
+        )
+        dates_table.add_column('Name',       style='bold',   min_width=30)
+        dates_table.add_column('Type',       style='dim',    min_width=20)
+        dates_table.add_column('Start Date', style='green',  min_width=13, justify='center')
+        dates_table.add_column('End Date',   style='yellow', min_width=13, justify='center')
+        for row in sorted(all_active, key=lambda r: (r['Item Type'], r['Name'])):
+            dates_table.add_row(
+                row['Name'],
+                row['Item Type'],
+                row.get('Schedule From') or '[dim]not set[/dim]',
+                row.get('Schedule Until') or '[dim]not set[/dim]',
+            )
+        console.print()
+        console.print(dates_table)
+
+    console.print()
+    console.print(f'  [bold]Saved to:[/bold] [cyan]{output_path}[/cyan]')
+    console.print()
+
+
+if __name__ == '__main__':
+    main()
