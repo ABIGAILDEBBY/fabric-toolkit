@@ -152,6 +152,7 @@ def push_parts(item_id, parts):
             s = poll.json().get('status', '')
             if s in ('Succeeded', 'Failed') or poll.status_code == 200:
                 return s != 'Failed'
+        return False
     return r.status_code in (200, 202, 204)
 
 
@@ -169,6 +170,11 @@ def disable_fabric_schedule(item_id):
                     if s.get('enabled'):
                         s['enabled'] = False
                         updated = True
+                        cfg = s.get('configuration', {})
+                        if 'startDateTime' in cfg:
+                            cfg['startDateTime'] = '2099-01-01T00:00:00'
+                        if 'endDateTime' in cfg:
+                            cfg['endDateTime'] = '2100-12-31T23:59:59'
                 new_payload = base64.b64encode(
                     json.dumps(data, indent=2).encode('utf-8')
                 ).decode('utf-8')
@@ -359,6 +365,7 @@ def main():  # pragma: no cover
         # Live scan
         console.print('[dim]Scanning workspace for active schedules...[/dim]')
         console.print()
+        scan_errors = 0
 
         pipelines = requests.get(
             f'{FAB_BASE}/workspaces/{WORKSPACE_ID}/items?type=DataPipeline',
@@ -378,7 +385,27 @@ def main():  # pragma: no cover
                     to_disable[('Data Pipeline', name)] = True
                     console.print(f'    [green]+[/green] {name}')
             except Exception:
-                pass
+                scan_errors += 1
+
+        for item_type_label, api_type in [('Notebook', 'Notebook'), ('Spark Job Definition', 'SparkJobDefinition')]:
+            fab_items = requests.get(
+                f'{FAB_BASE}/workspaces/{WORKSPACE_ID}/items?type={api_type}',
+                headers=FAB, timeout=TIMEOUT
+            ).json().get('value', [])
+            console.print(f'  [dim]Checking {len(fab_items)} {item_type_label.lower()}s...[/dim]')
+            for it in fab_items:
+                name = it['displayName']
+                iid  = it['id']
+                try:
+                    r = requests.get(
+                        f'{FAB_BASE}/workspaces/{WORKSPACE_ID}/items/{iid}/jobs/schedules',
+                        headers=FAB, timeout=TIMEOUT
+                    )
+                    if r.ok and any(s.get('enabled') for s in r.json().get('value', [])):
+                        to_disable[(item_type_label, name)] = True
+                        console.print(f'    [green]+[/green] {name}')
+                except Exception:
+                    scan_errors += 1
 
         datasets = requests.get(
             f'{PBI_BASE}/groups/{WORKSPACE_ID}/datasets',
@@ -398,7 +425,7 @@ def main():  # pragma: no cover
                     to_disable[('Semantic Model', name)] = True
                     console.print(f'    [green]+[/green] {name}')
             except Exception:
-                pass
+                scan_errors += 1
 
         all_items = requests.get(
             f'{FAB_BASE}/workspaces/{WORKSPACE_ID}/items',
@@ -420,10 +447,12 @@ def main():  # pragma: no cover
                         to_disable[('Dataflow', name)] = True
                         console.print(f'    [green]+[/green] {name}')
                 except Exception:
-                    pass
+                    scan_errors += 1
 
         console.print()
         console.print(f'[bold green]✓[/bold green] Scan complete. {len(to_disable)} active schedule(s) found.')
+        if scan_errors:
+            console.print(f'  [yellow]⚠[/yellow] {scan_errors} item(s) could not be checked (network or permission error).')
 
     console.print()
 
